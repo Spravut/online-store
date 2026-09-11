@@ -75,7 +75,7 @@ PostgreSQL            app/db.py             — пул соединений
 | `app/migrate.py` | раннер миграций (таблица `schema_migrations`) |
 | `app/repositories/orders.py` | SQL по основной растущей сущности |
 | `app/repositories/analytics.py` | JOIN-ы через несколько таблиц и агрегации |
-| `migrations/*.sql` | схема и демо-данные |
+| `migrations/*.sql` | схема, демо-данные, индексы |
 | `scripts/generate_data.py` | массовая генерация данных |
 
 ## Схема БД
@@ -97,8 +97,17 @@ users ──1:N──▶ orders ──1:N──▶ order_items ◀──N:1─�
 Связи: one-to-many — `users → orders`, `categories → products`, `orders → order_items`;
 many-to-many — `orders ↔ products` через `order_items` и `users ↔ products` через `reviews`.
 
-Дополнительных индексов в схеме намеренно нет — только PRIMARY KEY и UNIQUE.
-Исходное состояние нужно, чтобы на модуле самим увидеть, что деградирует.
+Индексы сверх PRIMARY KEY и UNIQUE добавляются только по результатам измерений.
+Текущий набор создан в [`migrations/003_indexes.sql`](migrations/003_indexes.sql)
+по итогам лабораторной работы №1 — обоснование и планы выполнения до/после
+в отчёте [`docs/lab-01-indexes.md`](docs/lab-01-indexes.md):
+
+| Индекс | Под какой запрос | Эффект |
+|---|---|---|
+| `orders (user_id, created_at DESC)` | `GET /api/users/{id}/orders` | 50.6 мс → 0.28 мс |
+| `orders (status, created_at DESC)` | `GET /api/orders?status=&from=&to=` | 52.8 мс → 0.32 мс |
+| `orders (created_at DESC)` | лента заказов и диапазоны по дате | — |
+| `order_items (product_id)` | аналитика и проверка внешнего ключа | — |
 
 ## Основные endpoint'ы
 
@@ -336,11 +345,20 @@ docker compose exec postgres psql -U shop -d shop -c "SELECT count(*) FROM order
 схема не правится. Раннер ([`app/migrate.py`](app/migrate.py)) применяет файлы по
 порядку имён и запоминает применённые в таблице `schema_migrations`.
 
-Добавить миграцию: положить `003_что_то.sql` в `migrations/` и перезапустить backend.
+Добавить миграцию: положить `004_что_то.sql` в `migrations/` и перезапустить backend.
 
 Отключить автоприменение можно переменной окружения `RUN_MIGRATIONS=false`.
 
 ## Что будет дальше (на модуле)
 
-Специально **не сделано** заранее: индексы (кроме PK/UNIQUE), партиционирование,
-репликация, шардирование, оптимизация запросов. Это предмет занятий.
+Специально **не сделано** заранее: партиционирование, репликация, шардирование.
+Это предмет занятий.
+
+Уже пройдено:
+
+- **Лабораторная №1 — индексы и EXPLAIN ANALYZE**: [`docs/lab-01-indexes.md`](docs/lab-01-indexes.md),
+  индексы добавлены миграцией `003_indexes.sql`.
+
+Известное узкое место, которое индексами не лечится: агрегация
+`GET /api/analytics/sales-by-category` читает все `order_items` за период
+(433 мс на 2,5 млн строк). Решается партиционированием или витриной.
