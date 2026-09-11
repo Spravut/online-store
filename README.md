@@ -358,6 +358,8 @@ docker compose exec postgres psql -U shop -d shop -c "SELECT count(*) FROM order
 
 - **Лабораторная №1 — индексы и EXPLAIN ANALYZE**: [`docs/lab-01-indexes.md`](docs/lab-01-indexes.md),
   индексы добавлены миграцией `003_indexes.sql`.
+- **Лабораторная №2 — поведение при росте данных**: [`docs/lab-02-data-growth.md`](docs/lab-02-data-growth.md),
+  замеры на 100k / 1M / 5M заказов и граница применимости индексов.
 
 Известное узкое место, которое индексами не лечится: агрегация
 `GET /api/analytics/sales-by-category` читает все `order_items` за период

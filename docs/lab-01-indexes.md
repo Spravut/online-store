@@ -4,12 +4,16 @@
 
 | Часть | СУБД | Данные |
 |---|---|---|
-| Часть 1 (тестовая база) | PostgreSQL 18.4 | `orders` — 1 000 000 строк, 106 МБ |
+| Часть 1 (тестовая база) | PostgreSQL 18.4 | `orders` — 1 000 000 строк, таблица 85 МБ |
 | Часть 2 (свой сервис) | PostgreSQL 16.13 (docker-compose проекта) | `orders` — 1 000 300, `order_items` — 2 499 876 |
 
-Все замеры — «прогретый» кэш (запрос выполнялся дважды, берётся второй результат), поэтому
-в планах `Buffers: shared hit` без `read`. Числа с холодным кэшем были бы хуже, но сравнение
-«до/после» от этого не меняется.
+Все задания части 1 выполнены **одним скриптом подряд**, в порядке методички, на свежесозданной
+базе. Каждый измеряемый запрос выполнялся дважды; в отчёте приводится второй прогон (прогретый
+кэш), поэтому в планах `Buffers: shared hit` без `read`. Планы вставлены дословно, как их
+напечатал psql.
+
+В нескольких заданиях ожидаемый методичкой эффект **не воспроизвёлся** — такие места отмечены
+блоком «Примечание» с объяснением причины, а не подогнаны под ожидаемый ответ.
 
 ---
 
@@ -18,15 +22,19 @@
 ## Задания 1–2. Подготовка
 
 Таблица `orders` и 1 000 000 строк созданы по методичке, после загрузки выполнен `ANALYZE orders`.
+Размер таблицы — 85 МБ, вместе с индексом первичного ключа — 106 МБ.
+
 Индексов, кроме `orders_pkey`, на старте нет — это намеренная точка отсчёта.
 
 ## Задание 3. EXPLAIN
 
 ```
-Gather  (cost=1000.00..17037.43 rows=11 width=53)
-  Workers Planned: 2
-  ->  Parallel Seq Scan on orders  (cost=0.00..16036.33 rows=5 width=53)
-        Filter: (user_id = 123)
+                                QUERY PLAN
+--------------------------------------------------------------------------
+ Gather  (cost=1000.00..17037.43 rows=11 width=53)
+   Workers Planned: 2
+   ->  Parallel Seq Scan on orders  (cost=0.00..16036.33 rows=5 width=53)
+         Filter: (user_id = 123)
 ```
 
 **1. Какой план выбрал PostgreSQL?**
@@ -47,28 +55,30 @@ Gather  (cost=1000.00..17037.43 rows=11 width=53)
 ## Задание 4. EXPLAIN ANALYZE
 
 ```
-Gather  (... rows=11 width=53) (actual time=14.166..54.361 rows=9.00 loops=1)
-  Workers Launched: 2
-  Buffers: shared hit=10828
-  ->  Parallel Seq Scan on orders  (... rows=5) (actual time=11.969..36.839 rows=3.00 loops=3)
-        Filter: (user_id = 123)
-        Rows Removed by Filter: 333330
-Planning Time: 0.051 ms
-Execution Time: 54.394 ms
+ Gather  (cost=1000.00..17037.43 rows=11 width=53) (actual time=2.696..44.621 rows=11.00 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   Buffers: shared hit=10828
+   ->  Parallel Seq Scan on orders  (cost=0.00..16036.33 rows=5 width=53) (actual time=7.185..26.054 rows=3.67 loops=3)
+         Filter: (user_id = 123)
+         Rows Removed by Filter: 333330
+         Buffers: shared hit=10828
+ Planning Time: 0.067 ms
+ Execution Time: 44.686 ms
 ```
 
 | Метрика | Значение |
 |---|---|
 | Тип сканирования | Parallel Seq Scan |
-| Planning Time | 0.051 мс |
-| Execution Time | 54.394 мс |
-| Actual rows | 9 |
+| Planning Time | 0.067 мс |
+| Execution Time | 44.686 мс |
+| Actual rows | 11 |
 | Rows Removed by Filter | 333 330 **на процесс** → 999 990 всего |
 | Buffers | 10 828 страниц ≈ 84,6 МБ |
 
-Важно: у дочернего узла `loops=3`, и все `actual` там — среднее на один проход. Суммарно
-прочитано `999 990 + 9 ≈ 1 000 000` строк, то есть вся таблица ради 9 строк — **0,0009 %**
-полезной работы.
+У дочернего узла `loops=3`, и все `actual` там — среднее на один проход. Суммарно прочитано
+`999 990 + 11 ≈ 1 000 000` строк, то есть вся таблица ради 11 строк — **0,0011 %** полезной
+работы.
 
 **1. Чем EXPLAIN отличается от EXPLAIN ANALYZE?**
 `EXPLAIN` только планирует и печатает предсказания. `EXPLAIN ANALYZE` действительно выполняет
@@ -77,17 +87,20 @@ Execution Time: 54.394 ms
 смотреть такие планы нужно внутри `BEGIN; ... ROLLBACK;`.
 
 **2. Почему ANALYZE дольше?**
-Потому что запрос выполняется: 0.051 мс планирования против 54.394 мс чтения миллиона строк —
-разница в тысячу раз. Плюс инструментовка: Postgres вызывает таймер на входе и выходе каждого
+Потому что запрос выполняется: 0.067 мс планирования против 44.686 мс чтения миллиона строк —
+разница почти в 700 раз. Плюс инструментовка: Postgres вызывает таймер на входе и выходе каждого
 узла, что само по себе замедляет выполнение. Сравнивать «до/после» по `Execution Time` корректно
 (обе цифры завышены одинаково), а считать её временем ответа приложения — нет.
 
 **3. Estimated против actual?**
 `rows=11` — оценка из `pg_statistic`: 1 млн строк / ~100 тыс. различных `user_id` ≈ 10 строк
-на значение. `rows=9` — факт. Промах в 20 % — норма. Планировщик выбирает план **по оценкам**,
-поэтому ошибка в оценке в разы приводит к неправильному плану даже при наличии нужного индекса
-(см. задание 7). Причины расхождений: устаревшая статистика (лечится `ANALYZE`) или
-неравномерное распределение (лечится `default_statistics_target`).
+на значение. `rows=11.00` — факт. Здесь оценка совпала точно, потому что `ANALYZE` был выполнен
+сразу после загрузки, а данные генерировались равномерным `random()`.
+
+Почему это важно: планировщик выбирает план **по оценкам**, поэтому ошибка в оценке в разы
+приводит к неправильному плану даже при наличии нужного индекса. Причины расхождений —
+устаревшая статистика (лечится `ANALYZE`) или неравномерное распределение (лечится
+`default_statistics_target`).
 
 ---
 
@@ -95,18 +108,31 @@ Execution Time: 54.394 ms
 
 ## Задание 5
 
+```
+ Seq Scan on orders  (cost=0.00..20828.00 rows=1000000 width=53) (actual time=0.013..60.503 rows=1000000.00 loops=1)
+   Buffers: shared hit=10828
+ Execution Time: 97.430 ms
+```
+
+```
+ Seq Scan on orders  (cost=0.00..23328.00 rows=999900 width=53) (actual time=0.010..112.214 rows=999999.00 loops=1)
+   Filter: (amount > '0'::numeric)
+   Rows Removed by Filter: 1
+   Buffers: shared hit=10828
+ Execution Time: 145.903 ms
+```
+
 | Запрос | План | Execution Time |
 |---|---|---|
-| `SELECT * FROM orders` | Seq Scan, 1 000 000 строк | 129.381 мс |
-| `SELECT * FROM orders WHERE amount > 0` | Seq Scan + Filter, `Rows Removed by Filter: 1` | 216.994 мс |
+| `SELECT * FROM orders` | Seq Scan, 1 000 000 строк | 97.430 мс |
+| `SELECT * FROM orders WHERE amount > 0` | Seq Scan + Filter, `Rows Removed by Filter: 1` | 145.903 мс |
 
-**1. Тип сканирования?** `Seq Scan` в обоих случаях (без параллелизма: возвращаются все строки,
-делить нечего).
+**1. Тип сканирования?** `Seq Scan` в обоих случаях, причём **без параллелизма** — в отличие
+от задания 4. Возвращаются все строки, и распараллеливать нечего: выигрыш от воркеров съела бы
+пересылка миллиона строк ведущему процессу.
 
-**2. Почему Seq Scan?** В первом запросе условия нет вообще — нужна вся таблица. Во втором
-условие `amount > 0` формально есть, но ему удовлетворяют 999 999 строк из 1 000 000. Индекс
-означал бы: пройти всё дерево индекса, а потом ещё сходить в heap за каждой строкой — то есть
-сделать ту же работу плюс накладные расходы.
+**2. Почему Seq Scan?** В первом запросе условия нет вообще. Во втором условие `amount > 0`
+формально есть, но ему удовлетворяют 999 999 строк из 1 000 000 — отброшена ровно одна.
 
 **3. Всегда ли Seq Scan плох?** Нет. Последовательное чтение идёт подряд и хорошо
 предвыбирается, тогда как индексный доступ — это случайные обращения к страницам.
@@ -129,28 +155,31 @@ ANALYZE orders;
 ```
 
 ```
-Bitmap Heap Scan on orders (actual time=0.052..0.066 rows=9.00 loops=1)
-  Recheck Cond: (user_id = 123)
-  Heap Blocks: exact=9
-  Buffers: shared hit=12
-  ->  Bitmap Index Scan on idx_orders_user_id (actual time=0.042..0.042 rows=9.00 loops=1)
-        Index Cond: (user_id = 123)
-Execution Time: 0.142 ms
+ Bitmap Heap Scan on orders  (cost=4.51..47.60 rows=11 width=53) (actual time=0.023..0.028 rows=11.00 loops=1)
+   Recheck Cond: (user_id = 123)
+   Heap Blocks: exact=11
+   Buffers: shared hit=14
+   ->  Bitmap Index Scan on idx_orders_user_id  (cost=0.00..4.51 rows=11 width=0) (actual time=0.018..0.018 rows=11.00 loops=1)
+         Index Cond: (user_id = 123)
+         Index Searches: 1
+         Buffers: shared hit=3
+ Planning Time: 0.029 ms
+ Execution Time: 0.086 ms
 ```
 
 | Метрика | До индекса | После индекса |
 |---|---|---|
 | Тип Scan | Parallel Seq Scan | Bitmap Index Scan + Bitmap Heap Scan |
-| Execution Time | 54.394 мс | **0.142 мс** |
-| Обработано строк | ~1 000 000 | 9 |
-| Прочитано страниц | 10 828 | 12 |
+| Execution Time | 44.686 мс | **0.086 мс** |
+| Обработано строк | ~1 000 000 | 11 |
+| Прочитано страниц | 10 828 | 14 |
 | Используемый индекс | — | `idx_orders_user_id` |
 
 **1. План изменился?** Да, полностью: вместо перебора таблицы — обращение к индексу
-и чтение только 9 нужных страниц heap.
+и чтение только 11 нужных страниц heap.
 **2. Индекс используется?** Да. Ключевое отличие — `Index Cond` вместо `Filter`: условие
 теперь используется для поиска, а не для отсева уже прочитанного.
-**3. Насколько быстрее?** 54.394 → 0.142 мс, **в 383 раза**; объём чтения упал с 84,6 МБ до 96 КБ.
+**3. Насколько быстрее?** 44.686 → 0.086 мс, **в 520 раз**; объём чтения упал с 84,6 МБ до 112 КБ.
 
 ---
 
@@ -164,20 +193,41 @@ CREATE INDEX idx_orders_status ON orders(status);
 
 | Условие | Строк | Доля | План | Execution Time |
 |---|---|---|---|---|
-| `status = 'PAID'` | 250 805 | 25,1 % | Bitmap Heap Scan | 68.876 мс |
-| `status = 'NEW'` | 249 263 | 24,9 % | Bitmap Heap Scan | 70.413 мс |
-| `status = 'DELIVERED'` | 250 102 | 25,0 % | Bitmap Heap Scan | 70.864 мс |
-| `status = 'CANCELLED'` | 249 830 | 25,0 % | Bitmap Heap Scan | 68.329 мс |
-| `status <> 'PAID'` | 749 195 | 74,9 % | **Seq Scan** | 227.003 мс |
+| `status = 'PAID'` | 249 813 | 24,98 % | Bitmap Heap Scan | 111.839 мс |
+| `status = 'NEW'` | 250 321 | 25,03 % | Bitmap Heap Scan | 71.678 мс |
+| `status = 'DELIVERED'` | 250 380 | 25,04 % | Bitmap Heap Scan | 50.966 мс |
+| `status = 'CANCELLED'` | 249 486 | 24,95 % | Bitmap Heap Scan | 56.550 мс |
+| `status <> 'PAID'` (доп. эксперимент) | 750 187 | 75,02 % | **Seq Scan** | 170.912 мс |
 
-**1. Во всех ли случаях используется индекс?** Нет. Все четыре значения статуса распределены
-поровну, поэтому для них выбран Bitmap Scan. Но стоит увеличить долю выборки до 75 %
-(`status <> 'PAID'`) — и планировщик отказывается от индекса в пользу `Seq Scan`.
+```
+ Bitmap Heap Scan on orders  (cost=2812.00..16781.25 rows=251300 width=53) (actual time=17.614..94.385 rows=249813.00 loops=1)
+   Recheck Cond: ((status)::text = 'PAID'::text)
+   Heap Blocks: exact=10828
+   Buffers: shared hit=11041
+   ->  Bitmap Index Scan on idx_orders_status  (cost=0.00..2749.18 rows=251300 width=0) (actual time=15.004..15.006 rows=249813.00 loops=1)
+         Index Cond: ((status)::text = 'PAID'::text)
+ Execution Time: 111.839 ms
+```
+
+**1. Во всех ли случаях используется индекс?** Да, во всех четырёх — везде выбран
+`Bitmap Index Scan` по `idx_orders_status`. Причина в данных: значения статуса распределены
+поровну по 25 %, поэтому все четыре запроса для планировщика одинаковы, и разного поведения
+на них получить невозможно.
+
+> **Примечание.** Методичка предполагает, что на каких-то значениях индекс использоваться
+> не будет. На равномерно распределённых данных это недостижимо. Но использование индекса
+> здесь ничего не даёт: `Heap Blocks: exact=10828` одинаков во всех четырёх планах и равен
+> **полному числу страниц таблицы** — то есть таблица всё равно прочитана целиком, индекс
+> лишь сэкономил на проверке условия. Чтобы увидеть реальный отказ от индекса, добавлен
+> пятый запрос с долей выборки 75 % — там планировщик действительно переключается на `Seq Scan`.
+>
+> Разброс времени между статусами (51–112 мс при одинаковом объёме работы) — это шум
+> прогрева кэша, а не разница планов: `Buffers` и `Heap Blocks` во всех четырёх одинаковы.
 
 **2. Почему Seq Scan при наличии индекса?** Планировщик считает стоимость. При выборке
-250 тыс. строк даже bitmap-план всё равно читает `Heap Blocks: exact=10828` — **все страницы
-таблицы**; индекс здесь экономит только на отсеве, а не на чтении. При 75 % экономии нет вовсе,
-и лишний проход по индексу становится чистым убытком.
+250 тыс. строк даже bitmap-план всё равно читает все 10 828 страниц таблицы; индекс здесь
+экономит только на отсеве, а не на чтении. При 75 % экономии нет вовсе, и лишний проход
+по индексу становится чистым убытком.
 
 **3. Как число строк влияет на план?** Прямо: чем выше доля возвращаемых строк, тем менее
 выгоден индекс. Порядок перехода такой: `Index Scan` → `Bitmap Index Scan` → `Seq Scan`.
@@ -191,17 +241,18 @@ CREATE INDEX idx_orders_status ON orders(status);
 ```
   status   | count  |  pct
 -----------+--------+-------
- CANCELLED | 249830 | 24.98
- DELIVERED | 250102 | 25.01
- NEW       | 249263 | 24.93
- PAID      | 250805 | 25.08
+ CANCELLED | 249486 | 24.95
+ DELIVERED | 250380 | 25.04
+ NEW       | 250321 | 25.03
+ PAID      | 249813 | 24.98
 ```
 
 Распределение равномерное, селективность любого значения `status` — около 25 %. Именно поэтому
 индекс `idx_orders_status` ни для одного значения не даёт выигрыша: `Heap Blocks: exact=10828`
 во всех четырёх планах означает, что таблица всё равно прочитана целиком.
 
-Для сравнения, `user_id` даёт 1/100 000 ≈ 0,001 % — и там индекс ускорил запрос в 383 раза.
+Для сравнения, `user_id` даёт 11 строк из миллиона — 0,0011 % — и там индекс ускорил запрос
+в 520 раз.
 
 > **Вывод.** Эффективность индекса определяется не фактом его существования, а селективностью
 > условия. Индекс полезен, когда отсекает подавляющее большинство строк. На колонке с малым
@@ -222,18 +273,20 @@ CREATE INDEX idx_orders_created_at ON orders(created_at);
 
 | Диапазон | Строк | Доля | План | Execution Time |
 |---|---|---|---|---|
-| без индекса, 7 дней | 9 788 | 0,98 % | Parallel Seq Scan | 108.365 мс |
-| 1 день | 1 387 | 0,14 % | Bitmap Heap Scan, `Heap Blocks: 1309` | **12.543 мс** |
-| 7 дней | 9 788 | 0,98 % | Bitmap Heap Scan, `Heap Blocks: 6427` | **18.405 мс** |
-| 1 месяц | 41 814 | 4,2 % | Bitmap Heap Scan, `Heap Blocks: 10624` | 26.145 мс |
-| 1 год | 499 114 | 49,9 % | **Seq Scan** | 267.081 мс |
+| 7 дней, **без** индекса | 9 912 | 0,99 % | Parallel Seq Scan | 103.382 мс |
+| 1 день | 1 417 | 0,14 % | Bitmap Heap Scan, `Heap Blocks: exact=1314` | **1.409 мс** |
+| 7 дней | 9 912 | 0,99 % | Bitmap Heap Scan, `Heap Blocks: exact=6436` | **7.190 мс** |
+| 1 месяц | 41 942 | 4,19 % | Bitmap Heap Scan, `Heap Blocks: exact=10598` | 16.490 мс |
+| 1 год | 500 165 | 50,02 % | **Seq Scan** (индекс проигнорирован) | 231.301 мс |
 
 **1. Во всех ли случаях используется индекс?** Нет: на годовом диапазоне планировщик вернулся
-к `Seq Scan`.
+к `Seq Scan`. Здесь, в отличие от задания 7, отказ от индекса воспроизвёлся именно так,
+как описано в методичке.
 
 **2. Как размер диапазона влияет на план?** Чем шире окно, тем больше строк и тем больше
-страниц heap приходится читать. Видно по `Heap Blocks`: 1 309 → 6 427 → 10 624. Уже на месячном
-диапазоне (4 %) индекс приводит к чтению всех 10 828 страниц таблицы — выигрыш почти исчерпан.
+страниц heap приходится читать. Видно по `Heap Blocks`: 1 314 → 6 436 → 10 598. Уже на
+месячном диапазоне (4 %) индекс приводит к чтению 10 598 страниц из 10 828 — то есть
+практически всей таблицы. Выигрыш исчерпан, хотя формально индекс ещё используется.
 
 **3. Когда индекс становится невыгодным?** Когда число подходящих строк настолько велико, что
 целевые строки лежат почти в каждой странице. Тогда индексный доступ = полное чтение таблицы
@@ -246,11 +299,12 @@ CREATE INDEX idx_orders_created_at ON orders(created_at);
 ## Задание 10
 
 ```
-Bitmap Heap Scan on orders (actual time=3.267..17.603 rows=9788.00 loops=1)
-  Recheck Cond: (created_at > (now() - '7 days'::interval))
-  Heap Blocks: exact=6427
-  ->  Bitmap Index Scan on idx_orders_created_at (actual time=2.150..2.150 rows=9788.00)
-        Index Cond: (created_at > (now() - '7 days'::interval))
+ Bitmap Heap Scan on orders  (cost=177.30..11261.81 rows=9402 width=53) (actual time=2.453..6.739 rows=9912.00 loops=1)
+   Recheck Cond: (created_at > (now() - '7 days'::interval))
+   Heap Blocks: exact=6436
+   ->  Bitmap Index Scan on idx_orders_created_at  (cost=0.00..174.94 rows=9402 width=0) (actual time=1.707..1.708 rows=9912.00 loops=1)
+         Index Cond: (created_at > (now() - '7 days'::interval))
+ Execution Time: 7.190 ms
 ```
 
 **1. Что делает Bitmap Index Scan?** Проходит индекс и строит в памяти битовую карту страниц
@@ -277,33 +331,44 @@ SELECT * FROM orders WHERE user_id = 123 AND status = 'PAID';
 ```
 
 ```
-Bitmap Heap Scan on orders (actual time=0.238..0.432 rows=3.00 loops=1)
-  Recheck Cond: (user_id = 123)
-  Filter: ((status)::text = 'PAID'::text)
-  Rows Removed by Filter: 6
-  ->  Bitmap Index Scan on idx_orders_user_id (actual rows=9.00)
-Execution Time: 0.726 ms
+ Bitmap Heap Scan on orders  (cost=4.51..47.62 rows=3 width=53) (actual time=0.046..0.056 rows=7.00 loops=1)
+   Recheck Cond: (user_id = 123)
+   Filter: ((status)::text = 'PAID'::text)
+   Rows Removed by Filter: 4
+   Heap Blocks: exact=11
+   ->  Bitmap Index Scan on idx_orders_user_id  (cost=0.00..4.51 rows=11 width=0) (actual time=0.034..0.034 rows=11.00 loops=1)
+         Index Cond: (user_id = 123)
+ Execution Time: 0.119 ms
 ```
 
 **1. Один индекс или несколько?** Один — `idx_orders_user_id`. `status` остался в `Filter`.
-Это рационально: `user_id` отбирает 9 строк, и отсеять из них 6 дешевле, чем строить вторую
+Это рационально: `user_id` отбирает 11 строк, и отсеять из них 4 дешевле, чем строить вторую
 битовую карту на 250 тыс. строк.
 
-**2. Есть ли BitmapAnd?** В этом запросе — нет. Чтобы его получить, нужны два условия
-сопоставимой средней селективности:
+**2. Есть ли BitmapAnd?**
+
+> **Примечание.** В запросе из методички `BitmapAnd` **не появляется** — ни при каких прогонах.
+> Причина в том, что одно из условий слишком селективно: после `user_id = 123` остаётся 11 строк,
+> пересекать эту выборку с четвертью таблицы бессмысленно. Чтобы получить `BitmapAnd`, нужны
+> два условия сопоставимой средней селективности, поэтому добавлен отдельный эксперимент
+> с двумя диапазонами:
 
 ```
-Bitmap Heap Scan on orders (actual time=15.544..30.713 rows=2302.00 loops=1)
-  Recheck Cond: ((user_id >= 100) AND (user_id <= 2000) AND (created_at > now() - '90 days'))
-  ->  BitmapAnd (actual time=15.167..15.170)
-        ->  Bitmap Index Scan on idx_orders_user_id     (actual rows=19090.00)
-        ->  Bitmap Index Scan on idx_orders_created_at  (actual rows=122289.00)
-Execution Time: 31.323 ms
+ Bitmap Heap Scan on orders  (cost=2578.64..8207.25 rows=2295 width=53) (actual time=12.294..14.599 rows=2334.00 loops=1)
+   Recheck Cond: ((user_id >= 100) AND (user_id <= 2000) AND (created_at > (now() - '90 days'::interval)))
+   Heap Blocks: exact=2096
+   ->  BitmapAnd  (cost=2578.64..2578.64 rows=2295 width=0) (actual time=11.817..11.818 rows=0.00 loops=1)
+         ->  Bitmap Index Scan on idx_orders_user_id  (cost=0.00..268.19 rows=18376 width=0) (actual time=3.149..3.149 rows=18940.00 loops=1)
+               Index Cond: ((user_id >= 100) AND (user_id <= 2000))
+         ->  Bitmap Index Scan on idx_orders_created_at  (cost=0.00..2309.05 rows=124883 width=0) (actual time=8.198..8.198 rows=122599.00 loops=1)
+               Index Cond: (created_at > (now() - '90 days'::interval))
+ Execution Time: 14.989 ms
 ```
 
 **3. Зачем объединять индексы?** Битовые карты складываются побитово (`AND`), пересечение
-19 090 × 122 289 даёт всего 2 302 строки. Прочитать 2 077 страниц дешевле, чем 10 828 при
-использовании одного индекса или полном скане.
+18 940 × 122 599 даёт всего 2 334 строки. Прочитать 2 096 страниц дешевле, чем 10 828 при
+использовании одного индекса или полном скане. Обрати внимание на `rows=0.00` у самого узла
+`BitmapAnd` — он возвращает не строки, а карту, поэтому счётчик строк там всегда нулевой.
 
 ---
 
@@ -316,22 +381,22 @@ CREATE INDEX idx_orders_user_status ON orders(user_id, status);
 ```
 
 ```
-Index Scan using idx_orders_user_status on orders (actual time=0.111..0.147 rows=3.00 loops=1)
-  Index Cond: ((user_id = 123) AND ((status)::text = 'PAID'::text))
-  Buffers: shared hit=9
-Execution Time: 0.234 ms
+ Index Scan using idx_orders_user_status on orders  (cost=0.42..16.48 rows=3 width=53) (actual time=0.028..0.033 rows=7.00 loops=1)
+   Index Cond: ((user_id = 123) AND ((status)::text = 'PAID'::text))
+ Execution Time: 0.066 ms
 ```
 
-| Вариант | План | Execution Time | Buffers |
-|---|---|---|---|
-| Два отдельных индекса | Bitmap Heap Scan + Filter (отсеяно 6 строк) | 0.726 мс | 15 |
-| Составной индекс | Index Scan, оба условия в `Index Cond` | **0.234 мс** | 9 |
+| Вариант | План | Execution Time |
+|---|---|---|
+| Два отдельных индекса | Bitmap Heap Scan + Filter (отсеяно 4 строки) | 0.119 мс |
+| Составной индекс | Index Scan, оба условия в `Index Cond` | **0.066 мс** |
 
 **1. Что эффективнее?** Составной: лишние строки не читаются вообще, `Filter` из плана исчез.
 
-**2. Всегда ли составной лучше?** Нет. Он занимает больше места, замедляет запись и работает
-только для запросов, использующих его **префикс**. Два отдельных индекса универсальнее: каждый
-обслуживает свои запросы и может комбинироваться через `BitmapAnd`.
+**2. Всегда ли составной лучше?** Нет. Он занимает больше места (20 МБ против 9 МБ
+у одноколоночного), замедляет запись и работает только для запросов, использующих его
+**префикс**. Два отдельных индекса универсальнее: каждый обслуживает свои запросы и может
+комбинироваться через `BitmapAnd`.
 
 **3. От чего зависит выбор?** От набора реальных запросов. Если условия почти всегда идут
 вместе — составной. Если колонки используются независимо и в разных сочетаниях — отдельные.
@@ -343,28 +408,42 @@ Execution Time: 0.234 ms
 
 ## Задание 13
 
-Созданы `idx_orders_user_created_at (user_id, created_at)` и
+Созданы `idx_orders_user_created_at (user_id, created_at)`, затем
 `idx_orders_created_at_user (created_at, user_id)`.
 
-| Запрос | `(user_id, created_at)` | `(created_at, user_id)` |
+| Запрос | Какой индекс выбрал планировщик | Execution Time |
 |---|---|---|
-| Q1 `WHERE user_id = 123` | ✅ используется (префикс) | ❌ не подходит |
-| Q2 `WHERE user_id = 123 AND created_at > 30d` | ✅ обе колонки в `Index Cond`, 0.134 мс | частично |
-| Q3 `WHERE created_at > 30d` | ❌ не подходит | ✅ используется (префикс) |
+| Q1 `WHERE user_id = 123` | `idx_orders_user_created_at` (префикс) | 0.094 мс |
+| Q2 `WHERE user_id = 123 AND created_at > 30d` | `idx_orders_user_created_at`, **обе** колонки в `Index Cond` | 0.062 мс |
+| Q3 `WHERE created_at > 30d` | `idx_orders_created_at` — одноколоночный | 17.351 мс |
+| Q3 после создания `(created_at, user_id)` | снова `idx_orders_created_at` | 20.059 мс |
 
-Доказательство для Q3: если оставить только эти два индекса и запретить bitmap/index scan,
-планировщик уходит в `Parallel Seq Scan` (121.084 мс) вместо того, чтобы взять
-`(user_id, created_at)` — потому что использовать его для условия без `user_id` **невозможно**.
+```
+ Index Scan using idx_orders_user_created_at on orders  (cost=0.43..8.45 rows=1 width=53) (actual time=0.027..0.027 rows=1.00 loops=1)
+   Index Cond: ((user_id = 123) AND (created_at > (now() - '30 days'::interval)))
+ Execution Time: 0.062 ms
+```
+
+> **Примечание.** Индекс `(user_id, created_at)` для Q3 не был выбран ни разу — и это именно
+> то, что требовалось показать. А вот обратный индекс `(created_at, user_id)` тоже не выбирается:
+> планировщик предпочитает уже существующий одноколоночный `idx_orders_created_at`, потому что
+> тот меньше (21 МБ против 30 МБ) и даёт ту же выборку. Это не противоречит выводу задания:
+> по одному `created_at` работают оба индекса, где эта колонка стоит первой, а вот
+> `(user_id, created_at)` не подходит в принципе.
+
+Прямая проверка: если запретить bitmap- и index-доступ ко всем «подходящим» индексам,
+планировщик уходит в `Parallel Seq Scan` вместо того, чтобы взять `(user_id, created_at)` —
+использовать его для условия без `user_id` **невозможно**.
 
 **1. Как порядок влияет?** Индекс — это дерево, упорядоченное сначала по первой колонке,
-внутри неё по второй. Искать можно только по префиксу: по первой колонке, либо по первой и
-второй вместе. По одной второй колонке — нельзя.
+внутри неё по второй. Искать можно только по префиксу: по первой колонке, либо по первой
+и второй вместе. По одной второй колонке — нельзя.
 
 **2. Почему это разные индексы?** Физически это разные структуры с разным порядком сортировки.
 `(user_id, created_at)` группирует записи по пользователю, `(created_at, user_id)` — по времени.
 
-**3. Какой лучше для чего?** Q1 и Q2 → `(user_id, created_at)`. Q3 → `(created_at, user_id)`
-или обычный `(created_at)`. Практическое правило: **сначала колонки равенства, потом диапазон,
+**3. Какой лучше для чего?** Q1 и Q2 → `(user_id, created_at)`. Q3 → любой индекс, начинающийся
+с `created_at`. Практическое правило: **сначала колонки равенства, потом диапазон,
 потом сортировка**.
 
 ---
@@ -373,32 +452,43 @@ Execution Time: 0.234 ms
 
 ## Задание 14
 
-До индекса в плане присутствует явная сортировка:
+До создания индекса в плане присутствует явная сортировка:
 
 ```
-Sort (actual time=0.335..0.336 rows=9.00 loops=1)
-  Sort Key: created_at DESC
-  Sort Method: quicksort  Memory: 25kB
-  ->  Bitmap Heap Scan on orders ...
+ Sort  (cost=47.79..47.81 rows=11 width=53) (actual time=0.061..0.062 rows=11.00 loops=1)
+   Sort Key: created_at DESC
+   Sort Method: quicksort  Memory: 25kB
+   ->  Bitmap Heap Scan on orders  (cost=4.51..47.60 rows=11 width=53) (actual time=0.029..0.035 rows=11.00 loops=1)
+         Heap Blocks: exact=11
+         ->  Bitmap Index Scan on idx_orders_user_created_at  (cost=0.00..4.51 rows=11 width=0)
+               Index Cond: (user_id = 123)
+ Execution Time: 0.124 ms
 ```
 
 **1. Исчезла ли Sort после `CREATE INDEX ... (user_id, created_at DESC)`?**
-Честный ответ: нет — планировщик всё равно выбрал `Bitmap Heap Scan` + `quicksort`.
-Причина в объёме: у пользователя всего 9 заказов, отсортировать их в памяти дешевле, чем
-читать heap по одной строке в порядке индекса. Если запретить bitmap, план подтверждает,
-что индекс порядок обеспечивает — `Sort` пропадает:
+
+> **Примечание — эффект не воспроизвёлся.** Нет, `Sort` осталась на месте, время не изменилось
+> (0.124 мс до и 0.124 мс после), сменился только используемый индекс:
+> `idx_orders_user_created_at` → `idx_orders_user_created_at_desc`. Причина в объёме: у
+> пользователя 123 всего **11 заказов**. Отсортировать 11 строк в памяти (`quicksort Memory: 25kB`)
+> дешевле, чем читать heap по одной строке в порядке индекса, поэтому планировщик выбирает
+> bitmap-доступ и сортировку. Это не отменяет вывода задания, а показывает, что выигрыш от
+> упорядоченного индекса проявляется только при достаточном числе строк.
+
+Что индекс действительно даёт порядок, подтверждается принудительно (`SET enable_bitmapscan = off`):
 
 ```
-Index Scan using idx_orders_user_created_at_desc on orders (actual rows=9.00)
-  Index Cond: (user_id = 123)     -- узла Sort нет
+ Index Scan using idx_orders_user_created_at_desc on orders  (cost=0.42..48.62 rows=11 width=53) (actual time=0.020..0.026 rows=11.00 loops=1)
+   Index Cond: (user_id = 123)
+ Execution Time: 0.054 ms                 -- узла Sort в плане нет
 ```
 
-Там, где строк много, выигрыш становится решающим:
+А на выборке, где строк много, разница становится решающей:
 
 | `SELECT * FROM orders ORDER BY created_at DESC LIMIT 20` | План | Execution Time |
 |---|---|---|
-| без индекса по `created_at` | Gather Merge + top-N heapsort по 1 млн строк | 106.094 мс |
-| с индексом | `Index Scan Backward`, 23 страницы | **0.593 мс** |
+| с индексом по `created_at` | `Index Scan Backward`, 20 строк | **0.081 мс** |
+| без индексного доступа | Gather Merge + top-N heapsort по 1 млн строк | 78.467 мс |
 
 **2. Почему индекс может заменить сортировку?** B-tree хранит записи уже упорядоченными.
 Если порядок запроса совпадает с порядком индекса, строки можно читать подряд и сразу отдавать —
@@ -420,15 +510,18 @@ SELECT * FROM orders WHERE user_id = 123 ORDER BY created_at DESC LIMIT 20;
 
 | Этап | План | Execution Time |
 |---|---|---|
-| До | Bitmap Heap Scan → Sort → Limit | 0.211 мс |
-| После `(user_id, created_at DESC)` | Bitmap Heap Scan → Sort → Limit | 0.156 мс |
+| До `(user_id, created_at DESC)` | Limit → Sort → Bitmap Heap Scan | 0.142 мс |
+| После | Limit → Sort → Bitmap Heap Scan (тот же) | 0.157 мс |
+
+> **Примечание.** Как и в задании 14, на этих данных выигрыша нет: у пользователя 11 заказов,
+> а `LIMIT 20` больше этого числа, поэтому ограничивать нечего. Разница 0.142 против 0.157 мс —
+> шум измерения.
 
 **Выбранная структура индекса:** `(user_id, created_at DESC)` — равенство по `user_id` первым,
 колонка сортировки второй, направление `DESC` совпадает с `ORDER BY`. Это позволяет прочитать
-ровно 20 строк и остановиться, не сортируя всю выборку.
-
-На тестовых данных эффект мал: у каждого пользователя ~10 заказов, и сортировать почти нечего.
-Реальный масштаб выигрыша показан на собственном сервисе (Query 1 части 2): **50.584 → 0.279 мс**.
+ровно 20 строк и остановиться, не сортируя всю выборку. Реальный масштаб выигрыша виден на
+собственном сервисе (Query 1 части 2): **50.584 → 0.279 мс**, где у пользователя 83 заказа
+из миллиона, а не 11.
 
 ---
 
@@ -441,20 +534,27 @@ CREATE INDEX idx_orders_user_id_include ON orders(user_id) INCLUDE (id, status, 
 VACUUM ANALYZE orders;
 ```
 
+```
+ Index Only Scan using idx_orders_user_id_include on orders  (cost=0.42..4.62 rows=11 width=16) (actual time=0.036..0.038 rows=11.00 loops=1)
+   Index Cond: (user_id = 123)
+   Heap Fetches: 0
+ Execution Time: 0.077 ms
+```
+
 | Запрос | План | Execution Time |
 |---|---|---|
-| `SELECT id, user_id ...` до INCLUDE | Bitmap Heap Scan | 0.441 мс |
-| `SELECT id, user_id ...` после | **Index Only Scan**, `Heap Fetches: 0` | 0.324 мс |
-| `SELECT id, status, created_at ...` | Index Only Scan, 4 страницы | **0.103 мс** |
-| `SELECT * ...` | снова Bitmap Heap Scan | 0.304 мс |
+| `SELECT id, user_id ...` до INCLUDE | Bitmap Heap Scan, `Heap Blocks: exact=11` | 0.100 мс |
+| `SELECT id, user_id ...` после | **Index Only Scan**, `Heap Fetches: 0` | 0.077 мс |
+| `SELECT id, status, created_at ...` | Index Only Scan, `Heap Fetches: 0` | 0.071 мс |
+| `SELECT * ...` | снова Bitmap Heap Scan | 0.115 мс |
 
 **1. Отличие от Index Scan?** `Index Scan` по каждому найденному ключу идёт в таблицу за
 остальными колонками. `Index Only Scan` берёт все данные из самого индекса — `Heap Fetches: 0`.
 
 **2. Почему можно не ходить в таблицу?** В индексе нет информации о видимости версии строки,
 но есть карта видимости (visibility map). Если страница отмечена как «полностью видимая»,
-проверять heap не требуется. Поэтому после `VACUUM` такие планы появляются, а на свежеизменённых
-данных `Heap Fetches` растёт.
+проверять heap не требуется. Поэтому перед замером выполнен `VACUUM` — без него `Heap Fetches`
+был бы ненулевым.
 
 **3. Условия?** Все колонки запроса — и в `WHERE`, и в `SELECT` — должны присутствовать
 в индексе (как ключевые или через `INCLUDE`), и страницы должны быть отмечены в visibility map.
@@ -475,12 +575,23 @@ CREATE INDEX idx_orders_new ON orders(created_at) WHERE status = 'NEW';
 
 | Запрос | План | Execution Time |
 |---|---|---|
-| `WHERE status='NEW' ORDER BY created_at` (все 249 263 строки) | Bitmap Heap + **external merge Disk: 16 МБ** | 313.074 мс |
-| то же + `LIMIT 50` | **Index Scan using idx_orders_new**, 53 страницы | **0.705 мс** |
-| `WHERE status='PAID' ORDER BY created_at LIMIT 50` | `idx_orders_created_at` + Filter | 2.038 мс |
+| `WHERE status='NEW' ORDER BY created_at`, до частичного индекса | Bitmap Heap + **external merge Disk: 16176kB** | 270.634 мс |
+| то же, после создания частичного индекса | **тот же план**, индекс не выбран | 182.071 мс |
+| то же + `LIMIT 50` | **Index Scan using idx_orders_new**, 50 строк | **0.092 мс** |
+| `WHERE status='PAID' ORDER BY created_at LIMIT 50` | `idx_orders_created_at` + Filter, отсеяно 173 | 0.172 мс |
 
-Размер: частичный индекс **5 496 КБ** против 21 МБ у полного `(created_at)` — вчетверо меньше,
+Размер: частичный индекс **5 512 КБ** против 21 МБ у полного `(created_at)` — вчетверо меньше,
 потому что содержит только 25 % строк.
+
+> **Примечание — эффект воспроизвёлся лишь частично.** Запрос без `LIMIT` частичный индекс
+> **не использует**: чтобы вернуть все 250 321 строки в порядке `created_at`, пришлось бы сделать
+> четверть миллиона случайных обращений к heap, что дороже, чем прочитать таблицу целиком
+> и отсортировать (даже с выгрузкой 16 МБ на диск). Разница 270 → 182 мс между прогонами —
+> это шум, а не эффект индекса: план в обоих случаях идентичен.
+>
+> Индекс включается только вместе с `LIMIT` — и тогда даёт ускорение в **2 000 раз**
+> (182 мс → 0.092 мс), потому что читать нужно всего 50 первых записей уже в нужном порядке.
+> Это типичный сценарий очереди: «дай 50 самых старых необработанных заказов».
 
 **1. Преимущество?** Меньше размер → меньше страниц читать, дешевле поддерживать при записи
 (строки с другими статусами вообще не попадают в индекс). Плюс условие индекса эквивалентно
@@ -488,16 +599,11 @@ CREATE INDEX idx_orders_new ON orders(created_at) WHERE status = 'NEW';
 
 **2. Когда полезен?** Когда запросы регулярно бьют в узкое подмножество: очередь необработанных
 заказов, неудалённые записи (`WHERE deleted_at IS NULL`), активные пользователи, ошибки в логах.
-Классический случай — «горячие» 5 % строк большой таблицы.
 
 **3. Почему не один partial на все запросы?** Планировщик использует частичный индекс, только
 если может доказать, что условие запроса влечёт условие индекса. Запрос с `status = 'PAID'`
-под `WHERE status = 'NEW'` не подходит — что и видно в третьей строке таблицы: там выбран
-совсем другой индекс.
-
-Отдельное наблюдение: полная выборка 250 тыс. строк частичный индекс не использует. Читать
-столько строк в порядке индекса дороже, чем взять bitmap и отсортировать. Индекс выигрывает
-именно в паре с `LIMIT`.
+под `WHERE status = 'NEW'` не подходит — что и видно в последней строке таблицы: там выбран
+совсем другой индекс, а `status` ушёл в `Filter`.
 
 ---
 
@@ -509,23 +615,27 @@ CREATE INDEX idx_orders_new ON orders(created_at) WHERE status = 'NEW';
 
 | Запрос | План | Execution Time |
 |---|---|---|
-| `WHERE LOWER(email) = 'test@example.com'` | Parallel Seq Scan | 93.929 мс |
-| `WHERE email = 'test@example.com'` | Index Scan using `idx_users_email` | 0.061 мс |
-| `WHERE LOWER(email) = ...` после expression-индекса | Index Scan using `idx_users_lower_email` | **0.180 мс** |
+| `WHERE LOWER(email) = 'test@example.com'` | Parallel Seq Scan, `Filter: lower(...)` | 81.946 мс |
+| `WHERE email = 'test@example.com'` | Index Scan using `idx_users_email` | 0.077 мс |
+| `WHERE LOWER(email) = ...` после expression-индекса | Index Scan using `idx_users_lower_email` | **0.065 мс** |
+
+```
+ Index Scan using idx_users_lower_email on users  (cost=0.42..8.44 rows=1 width=30) (actual time=0.030..0.031 rows=1.00 loops=1)
+   Index Cond: (lower((email)::text) = 'test@example.com'::text)
+ Execution Time: 0.065 ms
+```
 
 **Почему обычный индекс по `email` не используется?** В индексе хранятся исходные значения
 (`User1@Example.com`), а запрос спрашивает про результат функции `LOWER(email)`. Для Postgres
 это разные выражения, и упорядоченность по `email` ничего не говорит об упорядоченности по
-`LOWER(email)`. Функция применяется к каждой строке уже после чтения — отсюда `Filter`.
-
-```sql
-CREATE INDEX idx_users_lower_email ON users(LOWER(email));
-```
+`LOWER(email)`. Функция применяется к каждой строке уже после чтения — отсюда `Filter`
+и `Rows Removed by Filter: 166667` на каждый из трёх процессов.
 
 > **Вывод.** Индекс применим, только когда выражение в запросе **текстуально совпадает**
 > с выражением в индексе. Любая обёртка над колонкой (`LOWER()`, `DATE()`, `col + 1`,
 > неявное приведение типа) делает обычный индекс непригодным. Решения два: индексировать
 > само выражение или переписать запрос так, чтобы колонка стояла «голой».
+> Ускорение здесь — **в 1 260 раз**.
 
 ---
 
@@ -538,11 +648,11 @@ CREATE INDEX idx_users_lower_email ON users(LOWER(email));
 
 | Метрика | Без индексов | С 5 индексами | Разница |
 |---|---|---|---|
-| Время INSERT 200k | 1 442.8 мс | 5 339.7 мс | **×3,7** |
-| Размер индексов | 4 408 КБ | 32 МБ | ×7,4 |
-| Полный размер | 21 МБ | 49 МБ | ×2,3 |
+| Время INSERT 200k | 970.5 мс | 4 257.1 мс | **×4.4** |
+| Размер индексов | 4 408 КБ | 31 MB | ×7.2 |
+| Полный размер | 21 MB | 48 MB | ×2.3 |
 
-**1. Как изменилось время?** Выросло в 3,7 раза.
+**1. Как изменилось время?** Выросло в 4,4 раза.
 
 **2. Почему?** Вставка строки — это не только запись в heap. Для каждого индекса нужно найти
 нужную страницу B-tree, вставить запись, при переполнении расщепить страницу, и всё это
@@ -563,34 +673,50 @@ CREATE INDEX idx_users_lower_email ON users(LOWER(email));
 ```
  relname |           indexrelname            | idx_scan |  size
 ---------+-----------------------------------+----------+---------
+ orders  | idx_orders_created_at_user        |        0 | 30 MB
+ orders  | idx_orders_user_status_created_at |        0 | 52 MB
  orders  | orders_pkey                       |        0 | 21 MB
  users   | users_pkey                        |        0 | 11 MB
- orders  | idx_orders_new                    |        2 | 5496 kB
- orders  | idx_orders_user_status_created_at |        2 | 52 MB
+ orders  | idx_orders_new                    |        2 | 5512 kB
+ orders  | idx_orders_user_status            |        2 | 20 MB
  users   | idx_users_email                   |        2 | 19 MB
  users   | idx_users_lower_email             |        2 | 19 MB
- orders  | idx_orders_created_at             |        5 | 21 MB
- orders  | idx_orders_user_id                |        5 | 9088 kB
  orders  | idx_orders_user_id_include        |        6 | 52 MB
- orders  | idx_orders_status                 |        9 | 6848 kB
- orders  | idx_orders_user_created_at_desc   |       12 | 30 MB
+ orders  | idx_orders_user_id                |        8 | 9088 kB
+ orders  | idx_orders_user_created_at_desc   |        9 | 30 MB
+ orders  | idx_orders_user_created_at        |       10 | 30 MB
+ orders  | idx_orders_status                 |       12 | 6848 kB
+ orders  | idx_orders_created_at             |       20 | 21 MB
 ```
 
-**1. Чаще всего использовались** `idx_orders_user_created_at_desc` (12) и `idx_orders_status` (9).
+**1. Чаще всего использовались** `idx_orders_created_at` (20 обращений) и `idx_orders_status` (12).
 
-**2. Неиспользованные:** `orders_pkey` и `users_pkey` — `idx_scan = 0`.
+**2. Неиспользованные:** четыре индекса с `idx_scan = 0` — `orders_pkey`, `users_pkey`,
+`idx_orders_created_at_user` и `idx_orders_user_status_created_at`.
 
-**3. Можно ли считать `idx_scan = 0` признаком бесполезности?** Нет, и оба первичных ключа —
-наглядный контрпример: они не участвовали в запросах лабораторной, но обеспечивают уникальность,
-и удалить их нельзя в принципе. Другие причины нулевого счётчика: статистика сброшена или
-собрана за короткий период; индекс нужен редкому, но критичному отчёту; он поддерживает
-внешний ключ и ускоряет проверки при удалении родительской строки; запросы к нему идут только
-с реплики.
+**3. Можно ли считать `idx_scan = 0` признаком бесполезности?** Нет, и этот вывод —
+три разных контрпримера в одной таблице:
+
+- `orders_pkey` и `users_pkey` не участвовали ни в одном запросе лабораторной, но обеспечивают
+  уникальность, и удалить их нельзя в принципе;
+- `idx_orders_created_at_user` действительно не пригодился — планировщик предпочёл
+  более компактный `idx_orders_created_at` (задание 13);
+- `idx_orders_user_status_created_at` показывает `0`, хотя **использовался несколькими
+  секундами ранее** в задании 21. Счётчики `pg_stat_user_indexes` обновляются асинхронно,
+  и статистика просто не успела дойти до коллектора.
+
+Последний пункт — главное предостережение: судить по `idx_scan` можно только на длинной
+дистанции, а не сразу после нагрузки. Другие причины нулевого счётчика: статистика сброшена;
+индекс нужен редкому, но критичному отчёту; он поддерживает внешний ключ; запросы к нему идут
+только с реплики.
 
 **4. Риски удаления:** деградация редких запросов, которая обнаружится не сразу; потеря
 уникальности или замедление проверок FK; на большой таблице повторное создание индекса —
-долгая и тяжёлая операция (спасает `CREATE INDEX CONCURRENTLY`). Перед удалением стоит
-посмотреть счётчик за длительный период и на всех репликах.
+долгая и тяжёлая операция (спасает `CREATE INDEX CONCURRENTLY`).
+
+Отдельно стоит посмотреть на итог: таблица `orders` занимает **85 МБ**, а её индексы —
+**277 МБ**, то есть в 3,3 раза больше самих данных. Это цена, которую пришлось заплатить
+за учебные эксперименты; в рабочей системе такой набор индексов недопустим.
 
 ---
 
@@ -605,33 +731,61 @@ ORDER BY created_at DESC LIMIT 50;
 ```
 
 **Потенциальные проблемы:** три условия сразу (равенство + равенство + диапазон) плюс сортировка
-и `LIMIT`. Одноколоночные индексы дают только частичное покрытие — остальное уходит в `Filter`
-и `Sort`.
+и `LIMIT`. К моменту задания 21 в таблице уже есть `(user_id, created_at DESC)`, поэтому
+исходный план не так плох, но `status` в нём проверяется фильтром, а `amount` требует
+обращения к таблице.
 
-| Вариант | План | Execution Time |
+**До** (используется `idx_orders_user_created_at_desc`):
+
+```
+ Limit ...
+   ->  Index Scan using idx_orders_user_created_at_desc on orders (actual time=0.039..0.040 rows=1.00 loops=1)
+         Index Cond: ((user_id = 123) AND (created_at >= (now() - '30 days'::interval)))
+         Filter: ((status)::text = 'PAID'::text)
+ Execution Time: 0.090 ms
+```
+
+**После** `CREATE INDEX idx_orders_user_status_created_at ON orders(user_id, status, created_at DESC) INCLUDE (amount)`:
+
+```
+ Limit ...
+   ->  Index Scan using idx_orders_user_status_created_at on orders (actual time=0.028..0.028 rows=1.00 loops=1)
+         Index Cond: ((user_id = 123) AND ((status)::text = 'PAID'::text) AND (created_at >= (now() - '30 days'::interval)))
+ Execution Time: 0.059 ms
+```
+
+| Метрика | До | После |
 |---|---|---|
-| A. Только одноколоночные индексы | Bitmap Heap Scan + Filter (отсеяно 8) + **Sort** | 2.221 мс |
-| B. + `(user_id, created_at DESC)` | Index Scan, `status` в `Filter`, Sort нет | 0.290 мс |
-| C. + `(user_id, status, created_at DESC) INCLUDE (amount)` | Index Scan, **все три условия в `Index Cond`** | **0.201 мс** |
+| Индекс | `(user_id, created_at DESC)` | `(user_id, status, created_at DESC) INCLUDE (amount)` |
+| Условия в `Index Cond` | 2 из 3 | **3 из 3** |
+| `Filter` | `status = 'PAID'` | отсутствует |
+| Execution Time | 0.090 мс | 0.059 мс |
+| Размер индекса | 30 MB | 52 MB |
 
-```
-Index Scan using idx_orders_user_status_created_at on orders (actual time=0.103..0.128 rows=3.00)
-  Index Cond: ((user_id = 54791) AND (status = 'PAID') AND (created_at >= now() - '30 days'))
-```
+> **Примечание.** Разница во времени здесь не показательна: у пользователя 123 всего 11 заказов,
+> из них 7 со статусом `PAID` и только **1** попадает в 30-дневное окно. Обе цифры — доли
+> миллисекунды, и различие лежит в пределах шума. Качественный результат другой и он
+> воспроизводим: все три условия ушли в `Index Cond`, `Filter` из плана исчез, то есть
+> планировщик больше не читает заведомо ненужные строки. На данных, где у пользователя тысячи
+> заказов, именно это даёт выигрыш — что и подтверждается в части 2 на реальном сервисе.
 
-**Объяснение порядка колонок:** `user_id` и `status` — условия равенства, они идут первыми и
-сужают поиск до одной ветки дерева. `created_at DESC` — третьей: внутри найденной ветки записи
-уже лежат в нужном порядке, поэтому диапазон читается подряд, а `ORDER BY ... LIMIT 50`
+**Объяснение порядка колонок:** `user_id` и `status` — условия равенства, они идут первыми
+и сужают поиск до одной ветки дерева. `created_at DESC` — третьей: внутри найденной ветки
+записи уже лежат в нужном порядке, поэтому диапазон читается подряд, а `ORDER BY ... LIMIT 50`
 выполняется без сортировки. Если поставить `created_at` раньше `status`, статус снова уйдёт
 в `Filter`. `INCLUDE (amount)` добавляет колонку из `SELECT`, не раздувая дерево поиска.
 
-**Цена:** индекс занимает 52 МБ против 30 МБ у варианта B при выигрыше 0.290 → 0.201 мс.
-На этих данных (≈10 заказов на пользователя) вариант B практически не хуже и дешевле.
-Вариант C оправдан там, где у пользователя тысячи заказов и `status` реально отсекает много строк.
+**Цена:** 52 МБ против 30 МБ. На этих данных такой индекс не окупается, и честный вывод —
+оставить `(user_id, created_at DESC)`. Вариант с тремя колонками оправдан там, где `status`
+реально отсекает много строк.
 
 ---
 
 # Часть 2. Работа со своим сервисом
+
+> Замеры этой части сняты на базе проекта в состоянии **1 000 300 заказов / 2 499 876 позиций**.
+> В лабораторной работе №2 та же база наращивается до 5 млн заказов, поэтому абсолютные значения
+> там будут другими — см. [`lab-02-data-growth.md`](lab-02-data-growth.md).
 
 ## Задание 22. Scaling Entity
 
@@ -760,13 +914,13 @@ Execution Time: 0.279 ms
 
 # Задание 30. Почему нельзя индексировать всё
 
-**Размер и хранение.** В лабораторной база из 1 млн строк занимала 106 МБ, а 11 индексов
-на ней — свыше 250 МБ. Индексы стали в 2,5 раза больше самих данных. Всё это нужно держать
-на диске, класть в резервные копии и, что важнее, тянуть через общий буферный кэш: чем больше
-бесполезных индексов, тем меньше памяти остаётся полезным данным.
+**Размер и хранение.** Измерено в задании 20: таблица `orders` из 1 млн строк занимает
+**85 МБ**, а десять созданных на ней индексов — **277 МБ**, то есть в 3,3 раза больше самих
+данных. Всё это нужно держать на диске, класть в резервные копии и, что важнее, тянуть через
+общий буферный кэш: чем больше бесполезных индексов, тем меньше памяти остаётся полезным данным.
 
 **INSERT.** Измерено в задании 19: пять индексов замедлили вставку 200 тыс. строк
-с 1 443 мс до 5 340 мс — в 3,7 раза. Каждая вставка обновляет **каждый** индекс: поиск
+с 970 мс до 4 257 мс — **в 4,4 раза**. Каждая вставка обновляет **каждый** индекс: поиск
 страницы, вставка, возможное расщепление, запись в WAL.
 
 **UPDATE.** Дороже всего. Если изменяется проиндексированная колонка, создаётся новая версия
@@ -777,10 +931,11 @@ Execution Time: 0.279 ms
 `VACUUM`. Чем больше индексов, тем дольше и тяжелее autovacuum, и тем сильнее раздувание
 (bloat).
 
-**Реальное использование.** Задание 20 показало, что часть индексов имеет `idx_scan = 0`.
-Индекс полезен только при высокой селективности условия: для `status` с четырьмя равномерными
-значениями обычный B-tree не использовался ни разу (задание 7). Такой индекс платит полную
-цену при записи, не давая ничего при чтении.
+**Реальное использование.** Задание 20 показало четыре индекса с `idx_scan = 0`, причём
+один из них (`idx_orders_created_at_user`) не пригодился по существу — планировщик предпочёл
+более компактный аналог. Индекс полезен только при высокой селективности условия: индекс по
+`status` с четырьмя равномерными значениями формально использовался, но читал при этом всю
+таблицу целиком (задание 7), то есть платил полную цену при записи, не давая ничего при чтении.
 
 **Побочный эффект для планировщика.** Больше индексов — больше вариантов плана, дольше
 планирование, выше риск, что при неточной статистике будет выбран неудачный путь.
@@ -798,3 +953,6 @@ Execution Time: 0.279 ms
 | [`migrations/003_indexes.sql`](../migrations/003_indexes.sql) | 4 индекса, обоснованных измерениями |
 | [`docs/lab-01-indexes.md`](lab-01-indexes.md) | этот отчёт |
 | [`README.md`](../README.md) | раздел про индексы и ссылка на отчёт |
+
+Часть 1 перепроверена повторным прогоном на чистой базе: все планы и времена в отчёте взяты
+из одного непрерывного скрипта, выполненного в порядке методички.

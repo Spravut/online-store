@@ -185,37 +185,37 @@ def generate_orders(
             )
 
             # Количество позиций зависит от o.id, поэтому у заказов оно разное.
+            # Сумма заказа считается в том же запросе: CTE возвращает только что
+            # вставленные строки (RETURNING), поэтому таблица order_items целиком
+            # не перечитывается — иначе каждая порция стоила бы полного скана.
             cur.execute(
                 """
-                INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase)
-                SELECT d.order_id, p.id, d.quantity, p.price
-                FROM (
-                    SELECT o.id                             AS order_id,
-                           1 + floor(random() * 3)::int     AS quantity,
-                           1 + floor(random() * %s)::bigint AS product_rn
-                    FROM orders o
-                    CROSS JOIN LATERAL generate_series(1, 1 + (o.id %% %s)::int) AS i
-                    WHERE o.id > %s
-                ) AS d
-                JOIN tmp_products p ON p.rn = d.product_rn
-                ON CONFLICT (order_id, product_id) DO NOTHING
+                WITH new_items AS (
+                    INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase)
+                    SELECT d.order_id, p.id, d.quantity, p.price
+                    FROM (
+                        SELECT o.id                             AS order_id,
+                               1 + floor(random() * 3)::int     AS quantity,
+                               1 + floor(random() * %s)::bigint AS product_rn
+                        FROM orders o
+                        CROSS JOIN LATERAL generate_series(1, 1 + (o.id %% %s)::int) AS i
+                        WHERE o.id > %s
+                    ) AS d
+                    JOIN tmp_products p ON p.rn = d.product_rn
+                    ON CONFLICT (order_id, product_id) DO NOTHING
+                    RETURNING order_id, quantity, price_at_purchase
+                ),
+                totals AS (
+                    SELECT order_id, SUM(quantity * price_at_purchase) AS total
+                    FROM new_items
+                    GROUP BY order_id
+                )
+                UPDATE orders o
+                SET total_amount = totals.total
+                FROM totals
+                WHERE o.id = totals.order_id
                 """,
                 (products_count, max_items, last_order_id),
-            )
-
-            cur.execute(
-                """
-                UPDATE orders o
-                SET total_amount = t.total
-                FROM (
-                    SELECT oi.order_id, SUM(oi.quantity * oi.price_at_purchase) AS total
-                    FROM order_items oi
-                    WHERE oi.order_id > %s
-                    GROUP BY oi.order_id
-                ) AS t
-                WHERE o.id = t.order_id
-                """,
-                (last_order_id,),
             )
 
         created += chunk
