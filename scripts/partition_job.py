@@ -39,12 +39,12 @@ logger = logging.getLogger("partition-job")
 
 def cmd_status(args: argparse.Namespace) -> int:
     with connection(readonly=True) as conn:
-        if not partitions_repo.is_partitioned(conn, args.table):
-            print(f"Таблица '{args.table}' не партиционирована")
+        if not partitions_repo.is_partitioned(conn, args.table, args.schema):
+            print(f"Таблица '{args.schema}.{args.table}' не партиционирована")
             return 1
-        rows = partitions_repo.list_partitions(conn, args.table)
+        rows = partitions_repo.list_partitions(conn, args.table, args.schema)
 
-    print(f"Таблица: {args.table}, партиций: {len(rows)}")
+    print(f"Таблица: {args.schema}.{args.table}, партиций: {len(rows)}")
     for row in rows:
         print(f"  {row['partition_name']:<28} {row['size']:>10}  {row['bounds']}")
     return 0
@@ -56,6 +56,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         horizon=args.horizon,
         granularity=args.granularity,
         today=args.today,
+        schema=args.schema,
     )
     if report["created"]:
         print("Созданы партиции: " + ", ".join(report["created"]))
@@ -70,6 +71,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         horizon=args.horizon,
         granularity=args.granularity,
         today=args.today,
+        schema=args.schema,
         force_notify=args.force_notify,
     )
 
@@ -94,7 +96,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 def cmd_break(args: argparse.Namespace) -> int:
     """Имитация сбоя: удаляем партицию, которую должен был создать job."""
     with connection() as conn:
-        partitions_repo.drop_partition(conn, args.partition)
+        partitions_repo.drop_partition(conn, args.partition, args.schema)
     print(f"Партиция {args.partition} удалена — теперь проверка должна вернуть CRITICAL")
     return 0
 
@@ -132,7 +134,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=settings.partition_horizon_days,
         help="на сколько периодов вперёд должны существовать партиции",
     )
-    parser.add_argument("--granularity", choices=["day", "month"], default="day")
+    parser.add_argument(
+        "--granularity", choices=["day", "month"], default=settings.partition_granularity
+    )
+    parser.add_argument("--schema", default="public")
     parser.add_argument(
         "--today",
         type=_parse_date,
@@ -167,6 +172,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     open_pool()
     try:
         return args.func(args)
+    except RuntimeError as exc:
+        # Ожидаемые ошибки конфигурации показываем текстом, без стектрейса.
+        print(f"Ошибка: {exc}")
+        return 1
     finally:
         close_pool()
 

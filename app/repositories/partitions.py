@@ -12,7 +12,7 @@ from psycopg import Connection, sql
 STATE_TABLE = "partition_alert_state"
 
 
-def is_partitioned(conn: Connection, table: str) -> bool:
+def is_partitioned(conn: Connection, table: str, schema: str = "public") -> bool:
     """Является ли таблица партиционированной (relkind = 'p')."""
     with conn.cursor() as cur:
         cur.execute(
@@ -20,15 +20,17 @@ def is_partitioned(conn: Connection, table: str) -> bool:
             SELECT c.relkind = 'p' AS partitioned
             FROM pg_class c
             JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relname = %s AND n.nspname = current_schema()
+            WHERE c.relname = %s AND n.nspname = %s
             """,
-            (table,),
+            (table, schema),
         )
         row = cur.fetchone()
         return bool(row and row["partitioned"])
 
 
-def list_partitions(conn: Connection, parent: str) -> List[Dict[str, Any]]:
+def list_partitions(
+    conn: Connection, parent: str, schema: str = "public"
+) -> List[Dict[str, Any]]:
     """Список партиций таблицы вместе с их границами и размером."""
     with conn.cursor() as cur:
         cur.execute(
@@ -40,20 +42,25 @@ def list_partitions(conn: Connection, parent: str) -> List[Dict[str, Any]]:
             JOIN pg_class parent ON parent.oid = i.inhparent
             JOIN pg_class child  ON child.oid  = i.inhrelid
             JOIN pg_namespace n  ON n.oid = parent.relnamespace
-            WHERE parent.relname = %s AND n.nspname = current_schema()
+            WHERE parent.relname = %s AND n.nspname = %s
             ORDER BY child.relname
             """,
-            (parent,),
+            (parent, schema),
         )
         return cur.fetchall()
 
 
-def partition_names(conn: Connection, parent: str) -> List[str]:
-    return [row["partition_name"] for row in list_partitions(conn, parent)]
+def partition_names(conn: Connection, parent: str, schema: str = "public") -> List[str]:
+    return [row["partition_name"] for row in list_partitions(conn, parent, schema)]
 
 
 def create_range_partition(
-    conn: Connection, parent: str, name: str, date_from: date, date_to: date
+    conn: Connection,
+    parent: str,
+    name: str,
+    date_from: date,
+    date_to: date,
+    schema: str = "public",
 ) -> None:
     """CREATE TABLE ... PARTITION OF ... FOR VALUES FROM ... TO ...
 
@@ -64,8 +71,8 @@ def create_range_partition(
         "CREATE TABLE IF NOT EXISTS {child} PARTITION OF {parent} "
         "FOR VALUES FROM ({date_from}) TO ({date_to})"
     ).format(
-        child=sql.Identifier(name),
-        parent=sql.Identifier(parent),
+        child=sql.Identifier(schema, name),
+        parent=sql.Identifier(schema, parent),
         date_from=sql.Literal(date_from),
         date_to=sql.Literal(date_to),
     )
@@ -73,10 +80,12 @@ def create_range_partition(
         cur.execute(statement)
 
 
-def drop_partition(conn: Connection, name: str) -> None:
+def drop_partition(conn: Connection, name: str, schema: str = "public") -> None:
     """Удаление партиции — нужно для проверки алерта (имитация сбоя job)."""
     with conn.cursor() as cur:
-        cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(name)))
+        cur.execute(
+            sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(schema, name))
+        )
 
 
 # --------------------------------------------------------- состояние алерта

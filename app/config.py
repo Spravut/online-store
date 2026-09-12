@@ -18,8 +18,9 @@ class Settings(BaseSettings):
     # --- партиционирование (лабораторная №3) ---
     # Таблица, за партициями которой следит job, и на сколько дней вперёд
     # они должны быть созданы.
-    partition_table: str = "events"
+    partition_table: str = "orders"
     partition_horizon_days: int = 3
+    partition_granularity: str = "month"  # day | month
 
     # --- алертинг ---
     # Токен и chat_id берутся ТОЛЬКО из окружения или .env, в репозиторий

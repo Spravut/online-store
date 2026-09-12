@@ -75,8 +75,9 @@ def required_partitions(
 def ensure_partitions(
     table: Optional[str] = None,
     horizon: Optional[int] = None,
-    granularity: str = DAY,
+    granularity: Optional[str] = None,
     today: Optional[date] = None,
+    schema: str = "public",
 ) -> Dict[str, Any]:
     """CreatePartitionsJob: создаёт недостающие партиции.
 
@@ -85,6 +86,7 @@ def ensure_partitions(
     """
     table = table or settings.partition_table
     horizon = horizon if horizon is not None else settings.partition_horizon_days
+    granularity = granularity or settings.partition_granularity
     today = today or date.today()
 
     logger.info("Partition job started. Table: %s, horizon: %s %s(s)", table, horizon, granularity)
@@ -93,12 +95,12 @@ def ensure_partitions(
     created: List[str] = []
 
     with connection() as conn:
-        if not partitions_repo.is_partitioned(conn, table):
+        if not partitions_repo.is_partitioned(conn, table, schema):
             raise RuntimeError(
-                f"Таблица '{table}' не партиционирована — создавать партиции не для чего"
+                f"Таблица '{schema}.{table}' не партиционирована — создавать партиции не для чего"
             )
 
-        existing = set(partitions_repo.partition_names(conn, table))
+        existing = set(partitions_repo.partition_names(conn, table, schema))
         missing = [item for item in required if item[0] not in existing]
 
         logger.info("Existing partitions: %s", len(existing))
@@ -107,7 +109,9 @@ def ensure_partitions(
 
         for name, date_from, date_to in missing:
             logger.info("Creating: %s [%s .. %s)", name, date_from, date_to)
-            partitions_repo.create_range_partition(conn, table, name, date_from, date_to)
+            partitions_repo.create_range_partition(
+                conn, table, name, date_from, date_to, schema
+            )
             created.append(name)
             logger.info("Partition created successfully.")
 
@@ -127,20 +131,22 @@ def ensure_partitions(
 def check_partitions(
     table: Optional[str] = None,
     horizon: Optional[int] = None,
-    granularity: str = DAY,
+    granularity: Optional[str] = None,
     today: Optional[date] = None,
+    schema: str = "public",
 ) -> Dict[str, Any]:
     """PartitionHealthCheck: существуют ли все нужные партиции."""
     table = table or settings.partition_table
     horizon = horizon if horizon is not None else settings.partition_horizon_days
+    granularity = granularity or settings.partition_granularity
     today = today or date.today()
 
     required = required_partitions(table, today, horizon, granularity)
 
     with connection(readonly=True) as conn:
-        if not partitions_repo.is_partitioned(conn, table):
-            raise RuntimeError(f"Таблица '{table}' не партиционирована")
-        existing = set(partitions_repo.partition_names(conn, table))
+        if not partitions_repo.is_partitioned(conn, table, schema):
+            raise RuntimeError(f"Таблица '{schema}.{table}' не партиционирована")
+        existing = set(partitions_repo.partition_names(conn, table, schema))
 
     missing = [name for name, _, _ in required if name not in existing]
 
@@ -180,8 +186,9 @@ def format_recovery(report: Dict[str, Any]) -> str:
 def run_health_check(
     table: Optional[str] = None,
     horizon: Optional[int] = None,
-    granularity: str = DAY,
+    granularity: Optional[str] = None,
     today: Optional[date] = None,
+    schema: str = "public",
     notifier: Optional[TelegramNotifier] = None,
     force_notify: bool = False,
 ) -> Dict[str, Any]:
@@ -197,7 +204,7 @@ def run_health_check(
     `force_notify=True` отправляет сообщение независимо от прошлого статуса —
     удобно для демонстрации.
     """
-    report = check_partitions(table, horizon, granularity, today)
+    report = check_partitions(table, horizon, granularity, today, schema)
     notifier = notifier or TelegramNotifier()
 
     details = ", ".join(report["missing"]) if report["missing"] else ""
