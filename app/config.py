@@ -15,5 +15,22 @@ class Settings(BaseSettings):
     app_title: str = "Shop API"
     app_version: str = "1.0.0"
 
+    # --- партиционирование (лабораторная №3) ---
+    # Таблица, за партициями которой следит job, и на сколько дней вперёд
+    # они должны быть созданы.
+    partition_table: str = "events"
+    partition_horizon_days: int = 3
+
+    # --- алертинг ---
+    # Токен и chat_id берутся ТОЛЬКО из окружения или .env, в репозиторий
+    # не попадают: .env в .gitignore, в .env.example лежат заглушки.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    alerts_enabled: bool = True
+
+    @property
+    def telegram_configured(self) -> bool:
+        return bool(self.telegram_bot_token and self.telegram_chat_id)
+
 
 settings = Settings()

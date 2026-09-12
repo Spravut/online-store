@@ -339,6 +339,54 @@ python -m scripts.generate_data --orders 20000
 docker compose exec postgres psql -U shop -d shop -c "SELECT count(*) FROM orders;"
 ```
 
+## Партиционирование и алертинг (лабораторная №3)
+
+Эксплуатация партиций вынесена в отдельный слой: job создаёт партиции вперёд,
+health check убеждается, что они есть, а при расхождении уходит уведомление в Telegram.
+
+| Файл | Назначение |
+|---|---|
+| [`app/services/partitions.py`](app/services/partitions.py) | CreatePartitionsJob, PartitionHealthCheck, логика алертов |
+| [`app/repositories/partitions.py`](app/repositories/partitions.py) | SQL: чтение `pg_inherits`, создание партиций, состояние алерта |
+| [`app/alerts.py`](app/alerts.py) | отправка сообщений в Telegram |
+| [`scripts/partition_job.py`](scripts/partition_job.py) | CLI: `status`, `create`, `check`, `break`, `test-alert` |
+| [`scripts/lab3_sandbox.sql`](scripts/lab3_sandbox.sql) | учебная партиционированная таблица `events` |
+
+```bash
+docker compose exec -T postgres psql -U shop -d shop -f - < scripts/lab3_sandbox.sql
+docker compose exec backend python -m scripts.partition_job status
+docker compose exec backend python -m scripts.partition_job create
+docker compose exec backend python -m scripts.partition_job check
+```
+
+Уведомление отправляется только при **смене** статуса, поэтому один и тот же алерт
+не повторяется, а возврат в норму присылает отдельное recovery-сообщение:
+
+| Было | Стало | Действие |
+|---|---|---|
+| OK | CRITICAL | 🚨 alert |
+| CRITICAL | CRITICAL | молчим |
+| CRITICAL | OK | 🟢 recovery |
+| OK | OK | молчим |
+
+Последний статус хранится в таблице `partition_alert_state`, поэтому защита от спама
+переживает перезапуск контейнера.
+
+### Секреты
+
+Токен бота и `chat_id` берутся только из переменных окружения:
+
+```
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+ALERTS_ENABLED=true
+```
+
+Их место — файл `.env` рядом с `docker-compose.yml`; он добавлен в `.gitignore`
+и в репозиторий не попадает. Шаблон с заглушками лежит в [`.env.example`](.env.example),
+там же описано, как узнать `chat_id`. Если переменные не заданы, job работает
+как обычно, а сообщение уходит в лог вместо Telegram.
+
 ## Миграции
 
 Все изменения схемы — только через `.sql` файлы в `migrations/`, вручную через GUI

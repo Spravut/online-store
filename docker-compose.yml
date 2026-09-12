@@ -22,6 +22,13 @@ services:
     environment:
       DATABASE_URL: postgresql://shop:shop@postgres:5432/shop
       RUN_MIGRATIONS: "true"
+      # Секреты не хардкодятся: значения берутся из .env рядом с compose-файлом,
+      # а если переменной нет — подставляется пустая строка и алертинг молчит.
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+      ALERTS_ENABLED: "${ALERTS_ENABLED:-true}"
+      PARTITION_TABLE: "${PARTITION_TABLE:-events}"
+      PARTITION_HORIZON_DAYS: "${PARTITION_HORIZON_DAYS:-3}"
     ports:
       - "8000:8000"
     depends_on:
