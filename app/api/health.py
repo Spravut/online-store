@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+from app import scheduler
 from app.db import connection
 
 router = APIRouter(tags=["health"])
@@ -21,4 +22,11 @@ def health() -> JSONResponse:
             content={"status": "error", "database": "down", "detail": str(exc)},
         )
 
-    return JSONResponse(content={"status": "ok", "database": "up"})
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "database": "up",
+            # Видно, что планировщик поднялся и когда ждать следующий запуск.
+            "scheduler": scheduler.jobs_status(),
+        }
+    )

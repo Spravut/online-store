@@ -7,7 +7,9 @@ services:
       POSTGRES_PASSWORD: shop
       POSTGRES_DB: shop
     ports:
-      - "5432:5432"
+      # Порт на хосте можно переопределить в .env, если 5432 уже занят
+      # локально установленным PostgreSQL: POSTGRES_HOST_PORT=5434
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -30,8 +32,13 @@ services:
       PARTITION_TABLE: "${PARTITION_TABLE:-orders}"
       PARTITION_HORIZON_DAYS: "${PARTITION_HORIZON_DAYS:-3}"
       PARTITION_GRANULARITY: "${PARTITION_GRANULARITY:-month}"
+      SCHEDULER_ENABLED: "${SCHEDULER_ENABLED:-true}"
+      PARTITION_CREATE_HOUR: "${PARTITION_CREATE_HOUR:-1}"
+      PARTITION_CHECK_INTERVAL_MINUTES: "${PARTITION_CHECK_INTERVAL_MINUTES:-15}"
     ports:
-      - "8000:8000"
+      # Порт на хосте можно переопределить в .env: на Windows 8000 иногда
+      # попадает в зарезервированный Hyper-V диапазон и не биндится.
+      - "${API_HOST_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy

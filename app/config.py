@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     partition_horizon_days: int = 3
     partition_granularity: str = "month"  # day | month
 
+    # --- планировщик (заменяет cron) ---
+    scheduler_enabled: bool = True
+    scheduler_timezone: str = "UTC"
+    # Ночное создание партиций: время суток.
+    partition_create_hour: int = 1
+    partition_create_minute: int = 0
+    # Как часто проверять наличие партиций.
+    partition_check_interval_minutes: int = 15
+
     # --- алертинг ---
     # Токен и chat_id берутся ТОЛЬКО из окружения или .env, в репозиторий
     # не попадают: .env в .gitignore, в .env.example лежат заглушки.

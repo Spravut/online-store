@@ -368,6 +368,29 @@ docker compose exec backend python -m scripts.partition_job create
 docker compose exec backend python -m scripts.partition_job check
 ```
 
+### Планировщик
+
+Job и health check запускаются автоматически — планировщик поднимается вместе
+с приложением ([`app/scheduler.py`](app/scheduler.py)), внешний cron не нужен.
+
+| Задача | Расписание | Что делает |
+|---|---|---|
+| `CreatePartitionsJob` | ежедневно в 01:00 | создаёт партиции на горизонт вперёд |
+| `PartitionHealthCheck` | каждые 15 минут | проверяет наличие партиций, шлёт alert при смене статуса |
+
+Расписание настраивается переменными `PARTITION_CREATE_HOUR`
+и `PARTITION_CHECK_INTERVAL_MINUTES`, целиком выключается `SCHEDULER_ENABLED=false`.
+Состояние задач видно в `/health`:
+
+```json
+{"status": "ok", "database": "up",
+ "scheduler": [{"name": "PartitionHealthCheck", "next_run_at": "..."},
+               {"name": "CreatePartitionsJob",  "next_run_at": "..."}]}
+```
+
+Те же операции доступны вручную через CLI — это удобно для демонстрации
+и не требует ждать срабатывания расписания.
+
 Уведомление отправляется только при **смене** статуса, поэтому один и тот же алерт
 не повторяется, а возврат в норму присылает отдельное recovery-сообщение:
 

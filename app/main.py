@@ -11,6 +11,7 @@ import psycopg
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app import scheduler
 from app.api import analytics, categories, health, orders, products, reviews, users
 from app.config import settings
 from app.db import close_pool, open_pool
@@ -26,7 +27,9 @@ async def lifespan(app: FastAPI):
     open_pool()
     if settings.run_migrations:
         run_migrations()
+    scheduler.start()
     yield
+    scheduler.shutdown()
     close_pool()
 
 
