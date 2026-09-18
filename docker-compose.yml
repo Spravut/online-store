@@ -6,23 +6,70 @@ services:
       POSTGRES_USER: shop
       POSTGRES_PASSWORD: shop
       POSTGRES_DB: shop
+      # Учётка для streaming replication. Создаётся init-скриптом при первом
+      # запуске с пустым томом.
+      REPLICATION_USER: "${REPLICATION_USER:-replicator}"
+      REPLICATION_PASSWORD: "${REPLICATION_PASSWORD:-replpass}"
     ports:
       # Порт на хосте можно переопределить в .env, если 5432 уже занят
       # локально установленным PostgreSQL: POSTGRES_HOST_PORT=5434
       - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U shop -d shop"]
       interval: 3s
       timeout: 3s
       retries: 20
 
+  # --- Replica: копия primary, принимает только чтение -----------------------
+  # При первом старте забирает базовую копию через pg_basebackup и дальше
+  # непрерывно проигрывает поток WAL с primary.
+  postgres_replica:
+    image: postgres:16-alpine
+    container_name: shop_postgres_replica
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      PGPASSWORD: "${REPLICATION_PASSWORD:-replpass}"
+      REPLICATION_USER: "${REPLICATION_USER:-replicator}"
+      REPLICATION_PASSWORD: "${REPLICATION_PASSWORD:-replpass}"
+    ports:
+      - "${POSTGRES_REPLICA_HOST_PORT:-5433}:5432"
+    volumes:
+      - pgdata_replica:/var/lib/postgresql/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Штатный entrypoint образа умеет только initdb, поэтому реплика
+    # разворачивается своей командой. Первый аргумент не "postgres",
+    # значит docker-entrypoint.sh просто выполнит скрипт.
+    command: >
+      sh -c '
+      if [ ! -s "$$PGDATA/PG_VERSION" ]; then
+        echo "инициализация реплики: pg_basebackup с primary";
+        rm -rf "$$PGDATA"/*;
+        su-exec postgres pg_basebackup -h postgres -p 5432 -U "$$REPLICATION_USER" -D "$$PGDATA" -Fp -Xs -P -R;
+        echo "primary_conninfo = '"'"'host=postgres port=5432 user=$$REPLICATION_USER password=$$REPLICATION_PASSWORD application_name=shop_replica'"'"'" >> "$$PGDATA/postgresql.auto.conf";
+        echo "hot_standby = on" >> "$$PGDATA/postgresql.auto.conf";
+      fi;
+      chown -R postgres:postgres "$$PGDATA";
+      chmod 0700 "$$PGDATA";
+      exec su-exec postgres postgres'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d shop"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
   backend:
     build: .
     container_name: shop_backend
     environment:
       DATABASE_URL: postgresql://shop:shop@postgres:5432/shop
+      # Пул для читающих запросов. Если переменная пустая, чтение идёт
+      # в primary — сервис работает и без реплики.
+      DATABASE_REPLICA_URL: "${DATABASE_REPLICA_URL-postgresql://shop:shop@postgres_replica:5432/shop}"
       RUN_MIGRATIONS: "true"
       # Секреты не хардкодятся: значения берутся из .env рядом с compose-файлом,
       # а если переменной нет — подставляется пустая строка и алертинг молчит.
@@ -42,6 +89,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres_replica:
+        condition: service_healthy
     volumes:
       - ./app:/app/app
       - ./migrations:/app/migrations
@@ -49,3 +98,4 @@ services:
 
 volumes:
   pgdata:
+  pgdata_replica:

@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql://shop:shop@localhost:5432/shop"
+    # Пул для читающих запросов (лабораторная №4). Пустая строка —
+    # реплики нет, чтение идёт в primary.
+    database_replica_url: str = ""
     run_migrations: bool = True
 
     db_pool_min_size: int = 2

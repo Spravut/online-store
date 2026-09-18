@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from app import scheduler
-from app.db import connection
+from app.db import connection, primary_replication_status, replica_enabled, replica_status
 
 router = APIRouter(tags=["health"])
 
@@ -28,5 +28,12 @@ def health() -> JSONResponse:
             "database": "up",
             # Видно, что планировщик поднялся и когда ждать следующий запуск.
             "scheduler": scheduler.jobs_status(),
+            # Куда уходит чтение и насколько реплика отстала от primary.
+            "replication": {
+                "replica_enabled": replica_enabled(),
+                "reads_go_to": "replica" if replica_enabled() else "primary",
+                "replicas_connected": primary_replication_status(),
+                "replica": replica_status(),
+            },
         }
     )

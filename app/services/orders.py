@@ -55,9 +55,13 @@ def list_orders(
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
-def get_order(order_id: int) -> Dict[str, Any]:
-    """Заказ целиком: шапка с покупателем + позиции с товарами и категориями."""
-    with connection(readonly=True) as conn:
+def get_order(order_id: int, use_replica: bool = True) -> Dict[str, Any]:
+    """Заказ целиком: шапка с покупателем + позиции с товарами и категориями.
+
+    `use_replica=False` нужен сразу после записи: реплика могла ещё не получить
+    изменение (replication lag), и заказ бы «не нашёлся».
+    """
+    with connection(readonly=use_replica) as conn:
         order = orders_repo.get_header_with_user(conn, order_id)
         if order is None:
             raise NotFoundError(f"Заказ {order_id} не найден")
@@ -99,7 +103,9 @@ def create_order(user_id: int, items: Sequence[Any]) -> Dict[str, Any]:
         # соединение из пула коммитится при выходе из блока `with`.
         order = orders_repo.create(conn, user_id, merged)
 
-    return get_order(order["id"])
+    # Read-after-write: читаем с primary, иначе на реплике заказа может
+    # ещё не быть и клиент получил бы 404 на только что созданный ресурс.
+    return get_order(order["id"], use_replica=False)
 
 
 def update_order_status(order_id: int, status: str) -> Dict[str, Any]:

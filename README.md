@@ -37,7 +37,8 @@ docker compose up
 | Swagger UI | http://localhost:8000/docs |
 | OpenAPI JSON | http://localhost:8000/openapi.json |
 | Health check | http://localhost:8000/health |
-| PostgreSQL | `localhost:5432`, база `shop`, пользователь/пароль `shop` / `shop` |
+| PostgreSQL (primary) | `localhost:5432`, база `shop`, пользователь/пароль `shop` / `shop` |
+| PostgreSQL (replica) | `localhost:5433`, те же учётные данные, только чтение |
 
 Полная пересборка с чистой базой:
 
@@ -63,8 +64,9 @@ PostgreSQL            app/db.py             — пул соединений
 репозитории, и только репозитории выполняют SQL.
 
 Подключение к PostgreSQL живёт в одном месте — [`app/db.py`](app/db.py).
-Там же контекстный менеджер `connection(readonly=...)`: сейчас оба режима ходят
-в primary, а когда появится реплика, менять придётся только этот файл.
+Там же контекстный менеджер `connection(readonly=...)`: запись идёт в primary,
+чтение — на реплику. Маршрутизация целиком уместилась в этот файл, ни один
+SQL-запрос при переходе на реплику не изменился.
 
 Ключевые файлы:
 
@@ -348,6 +350,37 @@ python -m scripts.generate_data --orders 20000
 docker compose exec postgres psql -U shop -d shop -c "SELECT count(*) FROM orders;"
 ```
 
+## Масштабирование чтения (лабораторная №4)
+
+`docker compose up` поднимает два экземпляра PostgreSQL: **primary** принимает
+запись, **replica** обслуживает чтение через streaming replication.
+
+```
+POST /api/orders   →  primary   (запись)
+GET  /api/orders   →  replica   (чтение)
+```
+
+Маршрутизация — в [`app/db.py`](app/db.py): `connection(readonly=True)` берёт
+соединение из пула реплики, `connection()` — из пула primary. Репозитории про
+это не знают.
+
+Состояние репликации видно в `/health`:
+
+```json
+"replication": {
+  "reads_go_to": "replica",
+  "replicas_connected": [{"state": "streaming", "sync_state": "async", ...}],
+  "replica": {"in_recovery": true, "lag_seconds": 0.0}
+}
+```
+
+Репликация асинхронная, поэтому чтение **сразу после собственной записи** идёт
+на primary — иначе клиент мог бы получить 404 на только что созданный заказ
+(`get_order(..., use_replica=False)` в [`app/services/orders.py`](app/services/orders.py)).
+
+Если `DATABASE_REPLICA_URL` пуст или реплика недоступна, сервис поднимается
+как обычно и всё чтение идёт в primary.
+
 ## Партиционирование и алертинг (лабораторная №3)
 
 Эксплуатация партиций вынесена в отдельный слой: job создаёт партиции вперёд,
@@ -442,6 +475,8 @@ ALERTS_ENABLED=true
 - **Лабораторная №3 — партиционирование**: [`docs/lab-03-partitioning.md`](docs/lab-03-partitioning.md),
   `orders` разбита на месячные партиции, добавлены job создания партиций,
   health check и алертинг в Telegram.
+- **Лабораторная №4 — масштабирование чтения**: [`docs/lab-04-replication.md`](docs/lab-04-replication.md),
+  поднята streaming replication, чтение сервиса уходит на реплику.
 
 Известное узкое место, которое индексами не лечится: агрегация
 `GET /api/analytics/sales-by-category` читает все `order_items` за период
