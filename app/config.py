@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     alerts_enabled: bool = True
 
+    # --- шардирование (лабораторные №5 и №6) ---
+    # Адреса шардов через запятую. Порядок задаёт номера: первый URL —
+    # shard 0. Пустая строка — шардирование выключено, сервис работает
+    # только с основной базой.
+    shard_urls: str = ""
+    # modulo | consistent
+    shard_strategy: str = "consistent"
+    # Точек на кольце для каждого шарда в Consistent Hashing.
+    shard_virtual_nodes: int = 150
+    shard_pool_max_size: int = 5
+
     @property
     def telegram_configured(self) -> bool:
         return bool(self.telegram_bot_token and self.telegram_chat_id)

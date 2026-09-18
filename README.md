@@ -462,9 +462,80 @@ ALERTS_ENABLED=true
 
 Отключить автоприменение можно переменной окружения `RUN_MIGRATIONS=false`.
 
-## Что будет дальше (на модуле)
+## Шардирование (лабораторные №5 и №6)
 
-Специально **не сделано** заранее: репликация и шардирование. Это предмет занятий.
+`orders` и `order_items` дополнительно разложены по трём независимым PostgreSQL.
+Shard key — `orders.user_id`; `order_items` несут тот же ключ, поэтому позиции
+всегда лежат на том же шарде, что и заказ.
+
+| Слой | Файл |
+|---|---|
+| Стратегии выбора шарда | [`app/sharding/router.py`](app/sharding/router.py) |
+| Пулы соединений к шардам | [`app/sharding/pools.py`](app/sharding/pools.py) |
+| Single-shard и scatter-gather запросы | [`app/sharding/queries.py`](app/sharding/queries.py) |
+| HTTP API | [`app/api/shards.py`](app/api/shards.py) |
+| Схема шарда | [`migrations_shard/001_shard_init.sql`](migrations_shard/001_shard_init.sql) |
+| CLI | [`scripts/shard_admin.py`](scripts/shard_admin.py) |
+
+Router вызывается ровно в одном месте, репозитории о шардах не знают:
+
+```python
+with connection_for(user_id) as conn:   # route(user_id) -> номер шарда
+    ...
+```
+
+Стратегия переключается переменной `SHARD_STRATEGY` (`modulo` | `consistent`).
+При `consistent` расширение кластера 3 → 4 перемещает 22 % данных вместо 74.81 %
+у `hash % N` — измерения в [`docs/lab-05-sharding.md`](docs/lab-05-sharding.md).
+
+### Развернуть с нуля
+
+```bash
+docker compose up -d
+docker compose exec backend python -m scripts.shard_admin init
+docker compose exec backend python -m scripts.shard_admin load --limit 100000
+docker compose exec backend python -m scripts.shard_admin stats
+```
+
+Полезные команды CLI:
+
+| Команда | Что делает |
+|---|---|
+| `init` | применяет `migrations_shard/*.sql` на всех шардах |
+| `load --limit N --strategy modulo\|consistent` | раскладывает заказы по шардам |
+| `stats` | сколько записей осело на каждом шарде |
+| `rebalance --frm 3 --to 4` | сколько данных переедет при смене числа шардов |
+| `route <user_id>` | куда router отправит конкретный ключ |
+| `demo` | запросы лабораторной №6 с замерами |
+
+### Эндпоинты
+
+| Endpoint | shards_queried |
+|---|---|
+| `GET /api/shards/` | конфигурация и живая проверка шардов |
+| `GET /api/shards/stats` | распределение данных |
+| `GET /api/shards/route/{user_id}` | куда уедет ключ |
+| `GET /api/shards/users/{id}/orders` | **1** — в запросе есть shard key |
+| `GET /api/shards/users/{id}/stats` | **1** |
+| `GET /api/shards/orders/count` | 3 — scatter-gather |
+| `GET /api/shards/orders/revenue-by-status` | 3 |
+| `GET /api/shards/orders/recent` | 3 — `ORDER BY ... LIMIT` со слиянием |
+| `GET /api/shards/orders/recent-with-users` | 3 + 1 — JOIN склеивается в приложении |
+| `GET /api/shards/orders/by-id/{id}` | 3 — `id` не является shard key |
+
+Отказ шарда не роняет сервис: распределённые запросы отдают частичный ответ с
+`partial: true`, single-shard запросы к недоступному узлу — 503.
+
+### Порты
+
+| Контейнер | Порт на хосте |
+|---|---|
+| `shop_shard0` | 5440 |
+| `shop_shard1` | 5441 |
+| `shop_shard2` | 5442 |
+| `shop_shard3` | 5443 (резерв для эксперимента 3 → 4) |
+
+## Что будет дальше (на модуле)
 
 Уже пройдено:
 
@@ -477,6 +548,11 @@ ALERTS_ENABLED=true
   health check и алертинг в Telegram.
 - **Лабораторная №4 — масштабирование чтения**: [`docs/lab-04-replication.md`](docs/lab-04-replication.md),
   поднята streaming replication, чтение сервиса уходит на реплику.
+- **Лабораторная №5 — шардирование**: [`docs/lab-05-sharding.md`](docs/lab-05-sharding.md),
+  три PostgreSQL, router с двумя стратегиями, сравнение `hash % N` и Consistent Hashing.
+- **Лабораторная №6 — запросы после шардирования**: [`docs/lab-06-sharded-queries.md`](docs/lab-06-sharded-queries.md),
+  разбор реальных запросов сервиса: single-shard, scatter-gather, cross-shard JOIN,
+  отказ шарда, hot shard.
 
 Известное узкое место, которое индексами не лечится: агрегация
 `GET /api/analytics/sales-by-category` читает все `order_items` за период
